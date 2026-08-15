@@ -1,0 +1,209 @@
+# bump: ujson-version /UJSON_VERSION="(.*)"/ https://github.com/ultrajson/ultrajson.git|semver:*
+UJSON_VERSION="5.13.0"
+
+###
+### Build control file for the ujson port
+###
+### ujson is a drop-in JSON encoder/decoder implemented in C, materially
+### faster than the standard library's for large documents. Entirely a C
+### extension: there is no pure Python fallback, so a broken build fails at
+### import rather than running slowly.
+###
+
+export ZOPEN_PROJECT_NAME="ujson"
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_CATEGORIES="development library"
+
+export ZOPEN_STABLE_URL="https://github.com/ultrajson/ultrajson.git"
+export ZOPEN_STABLE_TAG="${UJSON_VERSION}"
+export ZOPEN_DEV_URL="https://github.com/ultrajson/ultrajson.git"
+
+export ZOPEN_STABLE_DEPS="check_python"
+export ZOPEN_DEV_DEPS="check_python"
+export ZOPEN_RUNTIME_DEPS="check_python"
+
+export ZOPEN_BUILD_SYSTEM="Python"
+
+zopen_get_version() {
+  echo "${UJSON_VERSION}"
+}
+
+zopen_python_test() {
+  UJSON_EXPECTED_VERSION="${UJSON_VERSION}" python - <<'PYEOF'
+import os
+import sys
+import sysconfig
+
+# Exercise the installed wheel rather than the checkout, which would otherwise
+# shadow it and let the tests pass against source that was never packaged.
+#
+# realpath on both sides: /tmp is a symlink to /$SYSNAME/tmp here, so a path
+# spelled /tmp/... and a working directory of /S0W1/tmp/... are the same place
+# while abspath compares them as different.
+_here = os.path.realpath(os.getcwd())
+sys.path = [p for p in sys.path
+            if p not in ("", ".") and os.path.realpath(p) != _here]
+
+failures = 0
+total = 0
+
+
+def check(label, fn):
+    global failures, total
+    total += 1
+    try:
+        if fn():
+            print("PASS:", label)
+        else:
+            print("FAIL:", label, file=sys.stderr)
+            failures += 1
+    except Exception as exc:
+        print("FAIL:", label, "-", exc, file=sys.stderr)
+        failures += 1
+
+
+try:
+    import ujson
+except ImportError as exc:
+    print("FAIL: import ujson -", exc, file=sys.stderr)
+    print("ujson FAILED to import on Python %s" % sys.version.split()[0])
+    sys.exit(1)
+
+import json as stdjson
+import importlib.metadata
+import math
+
+check("imported from the installed wheel, not the source tree",
+      lambda: os.path.realpath(ujson.__file__).startswith(
+          os.path.realpath(sysconfig.get_paths()["purelib"])))
+
+check("version is the one this port builds",
+      lambda: importlib.metadata.version("ujson")
+      == os.environ["UJSON_EXPECTED_VERSION"])
+
+
+def round_trip():
+    doc = {"s": "zopen", "i": 42, "f": 2.5, "b": True, "n": None,
+           "list": [1, 2, 3], "nested": {"a": {"b": "c"}}}
+    return ujson.loads(ujson.dumps(doc)) == doc
+
+
+check("round trip through dumps and loads", round_trip)
+
+
+def agrees_with_stdlib():
+    # The point of ujson is to be interchangeable with the standard library, so
+    # compare against it rather than only against itself.
+    doc = {"list": [1, 2, 3], "nested": {"a": 1.5}, "t": True, "n": None}
+    return stdjson.loads(ujson.dumps(doc)) == doc \
+        and ujson.loads(stdjson.dumps(doc)) == doc
+
+
+check("output interchanges with the standard library", agrees_with_stdlib)
+
+
+def non_ascii():
+    # Written as escapes rather than literals: this script is read from stdin on
+    # an EBCDIC platform, and a literal would not survive the trip intact.
+    doc = {"cafe": "caf\u00e9", "cjk": "\u4e2d\u6587", "emoji": "\U0001F600"}
+    return ujson.loads(ujson.dumps(doc)) == doc
+
+
+check("non-ascii text round trips", non_ascii)
+
+
+def escaped_output_is_ascii():
+    # ensure_ascii is the default, so the wire form should be plain ASCII bytes
+    # whatever the platform encoding is.
+    out = ujson.dumps({"k": "caf\u00e9"})
+    return out.encode("ascii") and "\\u00e9" in out
+
+
+check("ensure_ascii keeps the wire form ascii", escaped_output_is_ascii)
+
+check("ensure_ascii can be turned off",
+      lambda: ujson.loads(ujson.dumps({"k": "caf\u00e9"}, ensure_ascii=False))
+      == {"k": "caf\u00e9"})
+
+
+def numeric_edges():
+    for v in (0, -1, 2 ** 31, 2 ** 53, -(2 ** 53), 1.7976931348623157e308,
+              5e-324, 0.1):
+        if ujson.loads(ujson.dumps(v)) != v:
+            return False
+    return True
+
+
+check("integer and float edge values survive", numeric_edges)
+
+
+def rejects_malformed():
+    try:
+        ujson.loads("{not valid json")
+    except ValueError:
+        return True
+    return False
+
+
+check("malformed input raises rather than returning garbage",
+      rejects_malformed)
+
+
+def deep_structure():
+    doc = {"a": 1}
+    for _ in range(50):
+        doc = {"nest": doc}
+    return ujson.loads(ujson.dumps(doc)) == doc
+
+
+check("deeply nested documents round trip", deep_structure)
+
+
+def big_document():
+    doc = [{"id": i, "name": "row-%d" % i, "ok": i % 2 == 0}
+           for i in range(20000)]
+    return ujson.loads(ujson.dumps(doc)) == doc
+
+
+check("a twenty-thousand row document round trips", big_document)
+
+check("special floats are rejected or handled consistently",
+      lambda: ujson.loads(ujson.dumps(1e16)) == 1e16)
+
+print()
+print("ujson %s on Python %s  --  %d passed, %d failed" % (
+    importlib.metadata.version("ujson"),
+    sys.version.split()[0], total - failures, failures))
+sys.exit(1 if failures else 0)
+PYEOF
+}
+
+zopen_check_results() {
+  dir="$1"; pfx="$2"; chk="${dir}/${pfx}_check.log"
+  # No "|| echo 0": grep -c prints 0 when nothing matches and also exits 1, so
+  # the fallback appends a second zero and the arithmetic dies with FSUM9224.
+  passed=$(grep -c "^PASS:" "${chk}" 2>/dev/null)
+  failed=$(grep -c "^FAIL:" "${chk}" 2>/dev/null)
+  passed=${passed:-0}
+  failed=${failed:-0}
+  total=$((passed + failed))
+
+  # An interpreter whose test script dies before the first check contributes no
+  # PASS and no FAIL, so counting those alone would score a crash as a clean run.
+  interpreters=$(grep -c "^ujson .* on Python" "${chk}" 2>/dev/null)
+  interpreters=${interpreters:-0}
+  expected=$(echo "${ZOPEN_PYTHON_VERSIONS:-3.12 3.13 3.14}" | wc -w | tr -d ' ')
+  if [ "${interpreters}" -lt "${expected}" ]; then
+    silent=$((expected - interpreters))
+    failed=$((failed + silent))
+    total=$((total + silent))
+  fi
+
+  echo "actualFailures:${failed}"
+  echo "totalTests:${total}"
+  echo "expectedFailures:0"
+}
+
+zopen_append_to_validate_install() {
+  echo "python3 -c \"import ujson; assert ujson.loads(ujson.dumps({'a':[1,2.5,None,True]})) == {'a':[1,2.5,None,True]}; import importlib.metadata; print('ujson', importlib.metadata.version('ujson'))\""
+}
