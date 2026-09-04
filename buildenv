@@ -1,5 +1,5 @@
 # bump: ujson-version /UJSON_VERSION="(.*)"/ https://github.com/ultrajson/ultrajson.git|semver:*
-UJSON_VERSION="5.13.0"
+UJSON_VERSION="6.0.0"
 
 ###
 ### Build control file for the ujson port
